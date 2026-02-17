@@ -1,0 +1,679 @@
+/**
+ * Monthly Performance vs Goals Alert Script with Pacing Analysis
+ * Compares current month metrics against goals and sends email summary
+ * Uses yesterday's data (today-1) for stable reporting
+ * Labels campaigns as SCALE UP / ON TRACK / NEEDS ATTENTION / UNDERPERFORMING
+ * CAPTURES ALL CAMPAIGNS: ENABLED, PAUSED, AND REMOVED
+ */
+
+function main() {
+  // ============================================
+  // CONFIGURATION - UPDATE THESE VALUES
+  // ============================================
+  
+  var CONFIG = {
+    // Your goal numbers for the current month
+    goals: {
+      cost: 5000,           // Update this number every month! Monthly budget goal in your account currency
+      revenue: 100000,       // Update this number every month! Monthly revenue goal
+      roas: 25              // Update this number every month! Target ROAS (Conv value/cost)
+    },
+    
+    // Email settings
+    email: {
+      recipient: "your@emailaddress.com",  // Your email address
+      ccRecipients: "",                      // Optional: comma-separated emails
+      subject: "Google Ads Goal Performance Alert"
+    },
+    
+    // Optional: Account label filter (leave empty to check all accounts in MCC)
+    accountLabelFilter: "",  // e.g., "Active Clients" - only for MCC accounts
+    
+    // Campaign breakdown settings
+    minCampaignCost: 100,  // Update this number if you have many old campaigns. Only show campaigns with at least this much spend
+    
+    // Performance thresholds for campaign labeling
+    thresholds: {
+      revenueAheadPace: 1.10,      // 10% above pace = potential to scale
+      revenueOnPace: 0.90,         // Within 10% of pace = on track
+      roasOnTarget: 0.95,          // Within 5% of target = acceptable
+      roasUnderperforming: 0.85    // Below 85% of target = underperforming
+    }
+  };
+  
+  // ============================================
+  // SCRIPT LOGIC - NO NEED TO EDIT BELOW
+  // ============================================
+  
+  var accountData = [];
+  var totalMetrics = {
+    cost: 0,
+    revenue: 0,
+    conversions: 0
+  };
+  
+  // Get current month date range (ending yesterday)
+  var dateRange = getCurrentMonthDateRange();
+  
+  // Check if running in MCC or single account
+  if (typeof AdsManagerApp !== 'undefined') {
+    // MCC Account
+    var accountSelector = AdsManagerApp.accounts();
+    
+    if (CONFIG.accountLabelFilter) {
+      accountSelector = accountSelector.withCondition("LabelNames CONTAINS '" + CONFIG.accountLabelFilter + "'");
+    }
+    
+    var accountIterator = accountSelector.get();
+    
+    while (accountIterator.hasNext()) {
+      var account = accountIterator.next();
+      AdsManagerApp.select(account);
+      
+      var metrics = getAccountMetrics(dateRange);
+      var campaigns = getCampaignMetrics(dateRange, CONFIG.minCampaignCost);
+      
+      if (metrics.cost > 0 || metrics.revenue > 0) {
+        accountData.push({
+          name: account.getName(),
+          customerId: account.getCustomerId(),
+          metrics: metrics,
+          campaigns: campaigns
+        });
+        
+        totalMetrics.cost += metrics.cost;
+        totalMetrics.revenue += metrics.revenue;
+        totalMetrics.conversions += metrics.conversions;
+      }
+    }
+  } else {
+    // Single Account
+    var metrics = getAccountMetrics(dateRange);
+    var campaigns = getCampaignMetrics(dateRange, CONFIG.minCampaignCost);
+    
+    accountData.push({
+      name: AdsApp.currentAccount().getName(),
+      customerId: AdsApp.currentAccount().getCustomerId(),
+      metrics: metrics,
+      campaigns: campaigns
+    });
+    
+    totalMetrics = metrics;
+  }
+  
+  // Calculate overall ROAS
+  totalMetrics.roas = totalMetrics.cost > 0 ? totalMetrics.revenue / totalMetrics.cost : 0;
+  
+  // Calculate pacing
+  var pacing = calculatePacing(totalMetrics, CONFIG.goals, dateRange);
+  
+  // Label campaigns with performance status
+  for (var i = 0; i < accountData.length; i++) {
+    labelCampaigns(accountData[i].campaigns, CONFIG.goals, pacing.progressPercentage / 100, CONFIG.thresholds);
+  }
+  
+  // Send email
+  sendPerformanceEmail(CONFIG, totalMetrics, pacing, accountData, dateRange);
+  
+  Logger.log("Script completed. Email sent to: " + CONFIG.email.recipient);
+}
+
+/**
+ * Get current month date range (ending yesterday)
+ */
+function getCurrentMonthDateRange() {
+  var timezone = AdsApp.currentAccount().getTimeZone();
+  var today = new Date();
+  
+  // Get yesterday
+  var yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  
+  var year = yesterday.getFullYear();
+  var month = yesterday.getMonth(); // 0-indexed
+  
+  // First day of month
+  var firstDay = new Date(year, month, 1);
+  
+  // Last day of month
+  var lastDay = new Date(year, month + 1, 0);
+  
+  // Days elapsed (including yesterday)
+  var daysElapsed = yesterday.getDate();
+  
+  // Total days in month
+  var totalDays = lastDay.getDate();
+  
+  return {
+    start: Utilities.formatDate(firstDay, timezone, 'yyyyMMdd'),
+    end: Utilities.formatDate(yesterday, timezone, 'yyyyMMdd'),
+    label: Utilities.formatDate(firstDay, timezone, 'MMMM yyyy'),
+    reportDate: Utilities.formatDate(yesterday, timezone, 'dd MMM yyyy'),
+    daysElapsed: daysElapsed,
+    totalDays: totalDays,
+    progressPercentage: (daysElapsed / totalDays) * 100
+  };
+}
+
+/**
+ * Get metrics for current account - ALL CAMPAIGNS (enabled, paused, removed)
+ */
+function getAccountMetrics(dateRange) {
+  var query = 
+    "SELECT " +
+    "  metrics.cost_micros, " +
+    "  metrics.conversions_value, " +
+    "  metrics.conversions " +
+    "FROM campaign " +
+    "WHERE segments.date BETWEEN '" + dateRange.start + "' AND '" + dateRange.end + "'";
+    // REMOVED STATUS FILTER - now captures ALL campaigns regardless of status
+  
+  var report = AdsApp.report(query);
+  var rows = report.rows();
+  
+  var metrics = {
+    cost: 0,
+    revenue: 0,
+    conversions: 0
+  };
+  
+  while (rows.hasNext()) {
+    var row = rows.next();
+    metrics.cost += parseFloat(row['metrics.cost_micros']) / 1000000;
+    metrics.revenue += parseFloat(row['metrics.conversions_value']);
+    metrics.conversions += parseFloat(row['metrics.conversions']);
+  }
+  
+  metrics.roas = metrics.cost > 0 ? metrics.revenue / metrics.cost : 0;
+  
+  return metrics;
+}
+
+/**
+ * Get campaign-level metrics - ALL CAMPAIGNS (enabled, paused, removed)
+ */
+function getCampaignMetrics(dateRange, minCost) {
+  var query = 
+    "SELECT " +
+    "  campaign.name, " +
+    "  campaign.id, " +
+    "  campaign.status, " +
+    "  metrics.cost_micros, " +
+    "  metrics.conversions_value, " +
+    "  metrics.conversions " +
+    "FROM campaign " +
+    "WHERE segments.date BETWEEN '" + dateRange.start + "' AND '" + dateRange.end + "'";
+    // REMOVED STATUS FILTER - now captures ALL campaigns regardless of status
+  
+  var report = AdsApp.report(query);
+  var rows = report.rows();
+  
+  var campaigns = [];
+  
+  while (rows.hasNext()) {
+    var row = rows.next();
+    var cost = parseFloat(row['metrics.cost_micros']) / 1000000;
+    var revenue = parseFloat(row['metrics.conversions_value']);
+    var conversions = parseFloat(row['metrics.conversions']);
+    var status = row['campaign.status'];
+    
+    if (cost >= minCost || revenue > 0) {  // Include if has spend OR revenue
+      campaigns.push({
+        name: row['campaign.name'],
+        id: row['campaign.id'],
+        status: status,
+        cost: cost,
+        revenue: revenue,
+        conversions: conversions,
+        roas: cost > 0 ? revenue / cost : 0
+      });
+    }
+  }
+  
+  // Sort by cost descending
+  campaigns.sort(function(a, b) {
+    return b.cost - a.cost;
+  });
+  
+  return campaigns;
+}
+
+/**
+ * Calculate pacing metrics
+ */
+function calculatePacing(actual, goals, dateRange) {
+  var progressPct = dateRange.progressPercentage / 100;
+  
+  return {
+    cost: {
+      actual: actual.cost,
+      goal: goals.cost,
+      expected: goals.cost * progressPct,
+      varianceVsPace: actual.cost - (goals.cost * progressPct),
+      variancePct: ((actual.cost - (goals.cost * progressPct)) / (goals.cost * progressPct)) * 100,
+      projected: progressPct > 0 ? (actual.cost / progressPct) : 0,
+      projectedVariance: progressPct > 0 ? ((actual.cost / progressPct) - goals.cost) : 0,
+      status: getStatus('cost', actual.cost, goals.cost * progressPct)
+    },
+    revenue: {
+      actual: actual.revenue,
+      goal: goals.revenue,
+      expected: goals.revenue * progressPct,
+      varianceVsPace: actual.revenue - (goals.revenue * progressPct),
+      variancePct: ((actual.revenue - (goals.revenue * progressPct)) / (goals.revenue * progressPct)) * 100,
+      projected: progressPct > 0 ? (actual.revenue / progressPct) : 0,
+      projectedVariance: progressPct > 0 ? ((actual.revenue / progressPct) - goals.revenue) : 0,
+      status: getStatus('revenue', actual.revenue, goals.revenue * progressPct)
+    },
+    roas: {
+      actual: actual.roas,
+      goal: goals.roas,
+      expected: goals.roas,
+      varianceVsPace: actual.roas - goals.roas,
+      variancePct: ((actual.roas - goals.roas) / goals.roas) * 100,
+      projected: actual.roas,
+      status: getStatus('roas', actual.roas, goals.roas)
+    },
+    progressPercentage: dateRange.progressPercentage,
+    daysElapsed: dateRange.daysElapsed,
+    totalDays: dateRange.totalDays
+  };
+}
+
+/**
+ * Get status for metric
+ */
+function getStatus(metric, actual, expected) {
+  if (metric === 'cost') {
+    if (actual > expected * 1.1) return "OVER PACE";
+    if (actual < expected * 0.9) return "UNDER PACE";
+    return "ON PACE";
+  } else if (metric === 'revenue') {
+    if (actual >= expected * 0.95) return "ON PACE";
+    if (actual >= expected * 0.85) return "SLIGHTLY UNDER";
+    return "UNDER PACE";
+  } else if (metric === 'roas') {
+    if (actual >= expected * 0.95) return "ON TRACK";
+    return "UNDER TARGET";
+  }
+  return "N/A";
+}
+
+/**
+ * Label campaigns based on performance
+ */
+function labelCampaigns(campaigns, goals, progressPct, thresholds) {
+  var totalRevenue = 0;
+  for (var i = 0; i < campaigns.length; i++) {
+    totalRevenue += campaigns[i].revenue;
+  }
+  
+  for (var i = 0; i < campaigns.length; i++) {
+    var campaign = campaigns[i];
+    
+    // Calculate expected revenue for this campaign based on its current share
+    var campaignRevenueShare = totalRevenue > 0 ? campaign.revenue / totalRevenue : 0;
+    var expectedCampaignRevenue = goals.revenue * progressPct * campaignRevenueShare;
+    
+    // Alternative: Use simple pacing - what revenue should it have at this point based on current run rate
+    var projectedRevenue = progressPct > 0 ? campaign.revenue / progressPct : 0;
+    var expectedRevenueAtPace = campaign.revenue; // Its own current pace
+    
+    // Calculate revenue performance vs pace
+    var revenuePaceRatio = expectedRevenueAtPace > 0 ? projectedRevenue / (expectedRevenueAtPace / progressPct) : 1;
+    
+    // Calculate ROAS performance vs target
+    var roasPerformanceRatio = goals.roas > 0 ? campaign.roas / goals.roas : 0;
+    
+    // Determine label based on both revenue pacing and ROAS performance
+    var label = "";
+    var recommendation = "";
+    
+    // Special handling for paused/removed campaigns
+    if (campaign.status === 'PAUSED') {
+      label = "PAUSED";
+      if (campaign.roas >= goals.roas * thresholds.roasOnTarget) {
+        recommendation = "Was performing well - consider reactivating";
+      } else {
+        recommendation = "Paused - review before reactivating";
+      }
+    } else if (campaign.status === 'REMOVED') {
+      label = "REMOVED";
+      recommendation = "Historical data only";
+    } else {
+      // Active campaigns
+      if (campaign.roas >= goals.roas * thresholds.roasOnTarget && 
+          revenuePaceRatio >= thresholds.revenueAheadPace) {
+        // High ROAS + Revenue ahead of pace = Scale opportunity
+        label = "SCALE UP";
+        recommendation = "Strong performer - increase budget";
+        
+      } else if (campaign.roas >= goals.roas * thresholds.roasOnTarget && 
+                 revenuePaceRatio >= thresholds.revenueOnPace) {
+        // Good ROAS + Revenue on pace = Keep going
+        label = "ON TRACK";
+        recommendation = "Performing well - maintain";
+        
+      } else if (campaign.roas < goals.roas * thresholds.roasUnderperforming && 
+                 revenuePaceRatio < thresholds.revenueOnPace) {
+        // Poor ROAS + Revenue below pace = Problem
+        label = "UNDERPERFORMING";
+        recommendation = "Review targeting, creative, or pause";
+        
+      } else {
+        // Everything else needs attention
+        label = "NEEDS ATTENTION";
+        
+        if (campaign.roas < goals.roas * thresholds.roasOnTarget) {
+          recommendation = "ROAS below target - optimize bids/targeting";
+        } else if (revenuePaceRatio < thresholds.revenueOnPace) {
+          recommendation = "Revenue below pace - consider budget increase";
+        } else {
+          recommendation = "Monitor closely";
+        }
+      }
+    }
+    
+    campaign.label = label;
+    campaign.recommendation = recommendation;
+    campaign.revenuePaceRatio = revenuePaceRatio;
+    campaign.roasPerformanceRatio = roasPerformanceRatio;
+  }
+  
+  // Sort campaigns by label priority
+  campaigns.sort(function(a, b) {
+    var labelPriority = {
+      "SCALE UP": 1,
+      "ON TRACK": 2,
+      "NEEDS ATTENTION": 3,
+      "UNDERPERFORMING": 4,
+      "PAUSED": 5,
+      "REMOVED": 6
+    };
+    
+    var priorityDiff = labelPriority[a.label] - labelPriority[b.label];
+    if (priorityDiff !== 0) return priorityDiff;
+    
+    // Within same label, sort by cost descending
+    return b.cost - a.cost;
+  });
+}
+
+/**
+ * Format currency
+ */
+function formatCurrency(value) {
+  return "€" + value.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/**
+ * Format percentage
+ */
+function formatPercentage(value) {
+  return (value >= 0 ? "+" : "") + value.toFixed(1) + "%";
+}
+
+/**
+ * Send performance email
+ */
+function sendPerformanceEmail(config, metrics, pacing, accountData, dateRange) {
+  var htmlBody = 
+    "<html><body style='font-family: Arial, sans-serif;'>" +
+    "<h2 style='color: #1a73e8;'>Google Ads Performance Report - " + dateRange.label + "</h2>" +
+    "<p><strong>Report Date:</strong> " + dateRange.reportDate + " (Day " + dateRange.daysElapsed + " of " + dateRange.totalDays + 
+    " - " + pacing.progressPercentage.toFixed(1) + "% through month)</p>" +
+    "<p style='font-size: 13px; color: #5f6368;'><em>Note: Includes all campaigns (active, paused, and removed) with activity this month</em></p>" +
+    
+    // Executive Summary with Pacing
+    "<div style='background: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;'>" +
+    "<h3 style='margin-top: 0;'>📊 Performance Summary & Pacing</h3>" +
+    "<table style='width: 100%; border-collapse: collapse; font-size: 14px;'>" +
+    "<tr style='border-bottom: 2px solid #ddd; background: #e8eaed;'>" +
+    "<th style='text-align: left; padding: 10px;'>Metric</th>" +
+    "<th style='text-align: right; padding: 10px;'>Monthly Goal</th>" +
+    "<th style='text-align: right; padding: 10px;'>Current Actual</th>" +
+    "<th style='text-align: right; padding: 10px;'>Expected at Day " + dateRange.daysElapsed + "</th>" +
+    "<th style='text-align: right; padding: 10px;'>Variance vs Pace</th>" +
+    "<th style='text-align: right; padding: 10px;'>Projected Month-End</th>" +
+    "<th style='text-align: center; padding: 10px;'>Status</th>" +
+    "</tr>";
+  
+  // Cost row
+  htmlBody += 
+    "<tr style='border-bottom: 1px solid #eee;'>" +
+    "<td style='padding: 10px;'><strong>Cost</strong></td>" +
+    "<td style='text-align: right; padding: 10px;'>" + formatCurrency(pacing.cost.goal) + "</td>" +
+    "<td style='text-align: right; padding: 10px;'><strong>" + formatCurrency(pacing.cost.actual) + "</strong></td>" +
+    "<td style='text-align: right; padding: 10px;'>" + formatCurrency(pacing.cost.expected) + "</td>" +
+    "<td style='text-align: right; padding: 10px; color: " + (pacing.cost.varianceVsPace > 0 ? "#d93025" : "#137333") + ";'>" +
+    formatCurrency(Math.abs(pacing.cost.varianceVsPace)) + " (" + formatPercentage(pacing.cost.variancePct) + ")</td>" +
+    "<td style='text-align: right; padding: 10px; font-weight: bold; color: " + 
+    (pacing.cost.projectedVariance > 0 ? "#d93025" : "#137333") + ";'>" +
+    formatCurrency(pacing.cost.projected) + "</td>" +
+    "<td style='text-align: center; padding: 10px;'>" + getStatusBadge(pacing.cost.status) + "</td>" +
+    "</tr>";
+  
+  // Revenue row
+  htmlBody += 
+    "<tr style='border-bottom: 1px solid #eee;'>" +
+    "<td style='padding: 10px;'><strong>Revenue</strong></td>" +
+    "<td style='text-align: right; padding: 10px;'>" + formatCurrency(pacing.revenue.goal) + "</td>" +
+    "<td style='text-align: right; padding: 10px;'><strong>" + formatCurrency(pacing.revenue.actual) + "</strong></td>" +
+    "<td style='text-align: right; padding: 10px;'>" + formatCurrency(pacing.revenue.expected) + "</td>" +
+    "<td style='text-align: right; padding: 10px; color: " + (pacing.revenue.varianceVsPace >= 0 ? "#137333" : "#d93025") + ";'>" +
+    formatCurrency(Math.abs(pacing.revenue.varianceVsPace)) + " (" + formatPercentage(pacing.revenue.variancePct) + ")</td>" +
+    "<td style='text-align: right; padding: 10px; font-weight: bold; color: " + 
+    (pacing.revenue.projectedVariance >= 0 ? "#137333" : "#d93025") + ";'>" +
+    formatCurrency(pacing.revenue.projected) + "</td>" +
+    "<td style='text-align: center; padding: 10px;'>" + getStatusBadge(pacing.revenue.status) + "</td>" +
+    "</tr>";
+  
+  // ROAS row
+  htmlBody += 
+    "<tr>" +
+    "<td style='padding: 10px;'><strong>ROAS</strong></td>" +
+    "<td style='text-align: right; padding: 10px;'>" + pacing.roas.goal.toFixed(2) + "x</td>" +
+    "<td style='text-align: right; padding: 10px;'><strong>" + pacing.roas.actual.toFixed(2) + "x</strong></td>" +
+    "<td style='text-align: right; padding: 10px;'>" + pacing.roas.expected.toFixed(2) + "x</td>" +
+    "<td style='text-align: right; padding: 10px; color: " + (pacing.roas.varianceVsPace >= 0 ? "#137333" : "#d93025") + ";'>" +
+    (pacing.roas.varianceVsPace >= 0 ? "+" : "") + pacing.roas.varianceVsPace.toFixed(2) + "x (" + formatPercentage(pacing.roas.variancePct) + ")</td>" +
+    "<td style='text-align: right; padding: 10px; font-weight: bold;'>" + pacing.roas.projected.toFixed(2) + "x</td>" +
+    "<td style='text-align: center; padding: 10px;'>" + getStatusBadge(pacing.roas.status) + "</td>" +
+    "</tr>";
+  
+  htmlBody += "</table></div>";
+  
+  // Key Alerts
+  var alerts = [];
+  if (pacing.cost.status === "OVER PACE") {
+    alerts.push("⚠️ <strong>Spending " + Math.abs(pacing.cost.variancePct).toFixed(1) + "% faster than pace</strong> - projected to exceed budget by " + 
+                formatCurrency(Math.abs(pacing.cost.projectedVariance)));
+  }
+  if (pacing.revenue.status === "UNDER PACE") {
+    alerts.push("⚠️ <strong>Revenue " + Math.abs(pacing.revenue.variancePct).toFixed(1) + "% behind pace</strong> - projected shortfall of " + 
+                formatCurrency(Math.abs(pacing.revenue.projectedVariance)));
+  }
+  if (pacing.roas.status === "UNDER TARGET") {
+    alerts.push("⚠️ <strong>ROAS below target:</strong> " + pacing.roas.actual.toFixed(2) + "x vs " + pacing.roas.goal.toFixed(2) + "x goal (" + 
+                formatPercentage(pacing.roas.variancePct) + ")");
+  }
+  
+  if (alerts.length > 0) {
+    htmlBody += "<div style='background: #fef7e0; padding: 15px; border-left: 4px solid #f9ab00; margin: 20px 0;'>";
+    htmlBody += "<h3 style='margin-top: 0;'>🔔 Key Alerts</h3>";
+    htmlBody += "<ul style='margin: 0; padding-left: 20px;'>";
+    for (var i = 0; i < alerts.length; i++) {
+      htmlBody += "<li style='margin: 8px 0;'>" + alerts[i] + "</li>";
+    }
+    htmlBody += "</ul></div>";
+  }
+  
+  // Campaign breakdown
+  for (var accIdx = 0; accIdx < accountData.length; accIdx++) {
+    var account = accountData[accIdx];
+    
+    if (account.campaigns.length > 0) {
+      htmlBody += "<h3 style='margin-top: 30px;'>Campaign Performance & Recommendations";
+      if (accountData.length > 1) {
+        htmlBody += " - " + account.name;
+      }
+      htmlBody += "</h3>";
+      
+      // Count campaigns by label
+      var labelCounts = {
+        "SCALE UP": 0,
+        "ON TRACK": 0,
+        "NEEDS ATTENTION": 0,
+        "UNDERPERFORMING": 0,
+        "PAUSED": 0,
+        "REMOVED": 0
+      };
+      
+      for (var i = 0; i < account.campaigns.length; i++) {
+        labelCounts[account.campaigns[i].label]++;
+      }
+      
+      // Show summary
+      htmlBody += "<p style='font-size: 13px; color: #5f6368;'>";
+      htmlBody += "🚀 " + labelCounts["SCALE UP"] + " to scale up | ";
+      htmlBody += "✅ " + labelCounts["ON TRACK"] + " on track | ";
+      htmlBody += "⚠️ " + labelCounts["NEEDS ATTENTION"] + " need attention | ";
+      htmlBody += "🔴 " + labelCounts["UNDERPERFORMING"] + " underperforming";
+      if (labelCounts["PAUSED"] > 0) {
+        htmlBody += " | ⏸️ " + labelCounts["PAUSED"] + " paused";
+      }
+      if (labelCounts["REMOVED"] > 0) {
+        htmlBody += " | 🗑️ " + labelCounts["REMOVED"] + " removed";
+      }
+      htmlBody += "</p>";
+      
+      htmlBody += "<table style='width: 100%; border-collapse: collapse; font-size: 13px;'>";
+      htmlBody += 
+        "<tr style='background: #f8f9fa; border-bottom: 2px solid #ddd;'>" +
+        "<th style='text-align: left; padding: 8px;'>Campaign</th>" +
+        "<th style='text-align: right; padding: 8px;'>Cost</th>" +
+        "<th style='text-align: right; padding: 8px;'>Revenue</th>" +
+        "<th style='text-align: right; padding: 8px;'>ROAS</th>" +
+        "<th style='text-align: right; padding: 8px;'>ROAS vs Target</th>" +
+        "<th style='text-align: center; padding: 8px;'>Status</th>" +
+        "<th style='text-align: left; padding: 8px;'>Recommendation</th>" +
+        "</tr>";
+      
+      for (var i = 0; i < account.campaigns.length; i++) {
+        var campaign = account.campaigns[i];
+        
+        var roasVsTarget = campaign.roasPerformanceRatio;
+        var roasVsTargetPct = (roasVsTarget - 1) * 100;
+        
+        // Add visual indicator for paused/removed campaigns
+        var campaignNameDisplay = campaign.name;
+        if (campaign.status === 'PAUSED') {
+          campaignNameDisplay = "⏸️ " + campaign.name;
+        } else if (campaign.status === 'REMOVED') {
+          campaignNameDisplay = "🗑️ " + campaign.name;
+        }
+        
+        htmlBody += 
+          "<tr style='border-bottom: 1px solid #eee;" + 
+          (campaign.status !== 'ENABLED' ? " opacity: 0.6;" : "") + "'>" +
+          "<td style='padding: 8px;'>" + campaignNameDisplay + "</td>" +
+          "<td style='text-align: right; padding: 8px;'>" + formatCurrency(campaign.cost) + "</td>" +
+          "<td style='text-align: right; padding: 8px;'>" + formatCurrency(campaign.revenue) + "</td>" +
+          "<td style='text-align: right; padding: 8px;'><strong>" + campaign.roas.toFixed(2) + "x</strong></td>" +
+          "<td style='text-align: right; padding: 8px; color: " + 
+          (roasVsTargetPct >= 0 ? "#137333" : "#d93025") + ";'>" +
+          formatPercentage(roasVsTargetPct) + "</td>" +
+          "<td style='text-align: center; padding: 8px;'>" + getCampaignLabelBadge(campaign.label) + "</td>" +
+          "<td style='text-align: left; padding: 8px; font-size: 12px; color: #5f6368;'>" + campaign.recommendation + "</td>" +
+          "</tr>";
+      }
+      htmlBody += "</table>";
+    }
+  }
+  
+  // Account summary for MCC (if more than 1 account)
+  if (accountData.length > 1) {
+    htmlBody += "<h3 style='margin-top: 30px;'>Account Summary</h3>";
+    htmlBody += "<table style='width: 100%; border-collapse: collapse; font-size: 14px;'>";
+    htmlBody += 
+      "<tr style='background: #f8f9fa; border-bottom: 2px solid #ddd;'>" +
+      "<th style='text-align: left; padding: 8px;'>Account</th>" +
+      "<th style='text-align: right; padding: 8px;'>Cost</th>" +
+      "<th style='text-align: right; padding: 8px;'>Revenue</th>" +
+      "<th style='text-align: right; padding: 8px;'>ROAS</th>" +
+      "<th style='text-align: right; padding: 8px;'>Conversions</th>" +
+      "</tr>";
+    
+    for (var i = 0; i < accountData.length; i++) {
+      var acc = accountData[i];
+      htmlBody += 
+        "<tr style='border-bottom: 1px solid #eee;'>" +
+        "<td style='padding: 8px;'>" + acc.name + "</td>" +
+        "<td style='text-align: right; padding: 8px;'>" + formatCurrency(acc.metrics.cost) + "</td>" +
+        "<td style='text-align: right; padding: 8px;'>" + formatCurrency(acc.metrics.revenue) + "</td>" +
+        "<td style='text-align: right; padding: 8px;'>" + acc.metrics.roas.toFixed(2) + "x</td>" +
+        "<td style='text-align: right; padding: 8px;'>" + acc.metrics.conversions.toFixed(0) + "</td>" +
+        "</tr>";
+    }
+    htmlBody += "</table>";
+  }
+  
+  htmlBody += 
+    "<p style='margin-top: 30px; font-size: 12px; color: #666;'>Generated by Google Ads Script on " + 
+    Utilities.formatDate(new Date(), AdsApp.currentAccount().getTimeZone(), 'dd MMM yyyy HH:mm') + "</p>";
+  htmlBody += "</body></html>";
+  
+  // Send email
+  var mailOptions = {
+    htmlBody: htmlBody
+  };
+  
+  if (config.email.ccRecipients) {
+    mailOptions.cc = config.email.ccRecipients;
+  }
+  
+  MailApp.sendEmail(
+    config.email.recipient,
+    config.email.subject + " - " + dateRange.label,
+    "Please view this email in HTML format.",
+    mailOptions
+  );
+}
+
+/**
+ * Get status badge HTML
+ */
+function getStatusBadge(status) {
+  var colors = {
+    "ON PACE": "#137333",
+    "ON TRACK": "#137333",
+    "OVER PACE": "#d93025",
+    "UNDER PACE": "#f9ab00",
+    "SLIGHTLY UNDER": "#f9ab00",
+    "UNDER TARGET": "#d93025"
+  };
+  
+  var color = colors[status] || "#5f6368";
+  
+  return "<span style='background: " + color + "; color: white; padding: 4px 12px; border-radius: 12px; font-size: 11px; font-weight: bold;'>" + 
+         status + "</span>";
+}
+
+/**
+ * Get campaign label badge HTML
+ */
+function getCampaignLabelBadge(label) {
+  var config = {
+    "SCALE UP": { color: "#137333", icon: "🚀" },
+    "ON TRACK": { color: "#1a73e8", icon: "✅" },
+    "NEEDS ATTENTION": { color: "#f9ab00", icon: "⚠️" },
+    "UNDERPERFORMING": { color: "#d93025", icon: "🔴" },
+    "PAUSED": { color: "#5f6368", icon: "⏸️" },
+    "REMOVED": { color: "#9aa0a6", icon: "🗑️" }
+  };
+  
+  var labelConfig = config[label] || { color: "#5f6368", icon: "" };
+  
+  return "<span style='background: " + labelConfig.color + "; color: white; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: bold;'>" + 
+         labelConfig.icon + " " + label + "</span>";
+}
