@@ -5,21 +5,21 @@ What It Does
 Account-Level Summary
 Compares your Cost, Revenue, and ROAS (Conv. value / Cost) against your monthly goals — not just as raw numbers, but with full pacing context:
 
-Current Actual — what you've spent/earned so far this month
-Expected at Day X — what you should have at this point in the month
+Current Actual - what you've spent/earned so far this month
+Expected at Day X - what you should have at this point in the month
 Variance vs Pace — how far ahead or behind you are right now
-Projected Month-End — where you'll finish if current pace continues
+Projected Month-End - where you'll finish if current pace continues
 Status Badge — ON PACE / OVER PACE / UNDER PACE / UNDER TARGET
 
 Campaign-Level Breakdown
 Every campaign (active, paused, and removed) is listed with its performance metrics and an actionable label:
-🚀 SCALE UP: High ROAS + Revenue ahead of pace, Increase budget
-✅ ON TRACK: Good ROAS + Revenue on pace, Maintain
-⚠️ NEEDS ATTENTION: ROAS or revenue off target, Investigate
-🔴 UNDERPERFORMING: Poor ROAS + Revenue below pace, Review or pause
-⏸️ PAUSED: Campaign paused, had activity this month, Consider reactivating if ROAS was good
-🗑️ REMOVED: Campaign removed, historical data only, Reference only
-Campaigns are sorted by priority — your best opportunities first, your biggest problems last.
+1. 🚀 SCALE UP: High ROAS + Revenue ahead of pace, Increase budget
+2. ✅ ON TRACK: Good ROAS + Revenue on pace, Maintain
+3. ⚠️ NEEDS ATTENTION: ROAS or revenue off target, Investigate
+4. 🔴 UNDERPERFORMING: Poor ROAS + Revenue below pace, Review or pause
+5. ⏸️ PAUSED: Campaign paused, had activity this month, Consider reactivating if ROAS was good
+6. 🗑️ REMOVED: Campaign removed, historical data only, Reference only
+Campaigns are sorted by priority - your best opportunities first, your biggest problems last.
 
 Key Alerts Section
 The email highlights the most important issues clearly:
